@@ -542,6 +542,16 @@ bot.callbackQuery(TRACK_NAME, async (ctx) => {
 	await redis.sadd(REDIS_CHAT_IDS, ctx.chatId);
 
 	await ctx.answerCallbackQuery("Tracker set");
+
+	const kb = new InlineKeyboard()
+		.text("My trackers", MY_TRACKERS)
+		.row()
+		.text("Search another", ANOTHER_SEARCH);
+
+	await ctx.reply(
+		`Now tracking ${formatName(record.name)}. You'll be notified when it's nearing expiration.`,
+		{ reply_markup: kb },
+	);
 });
 
 /**
