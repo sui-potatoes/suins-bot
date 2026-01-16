@@ -282,7 +282,6 @@ bot.command("developer_info", (ctx) => {
 	// prettier-ignore
 	ctx.reply(
 		"Created by Sui Potatoes\n" +
-		"Contact: support@example.com\n" +
 		"GitHub: https://github.com/sui-potatoes\n" +
 		"Source Code: https://github.com/sui-potatoes/suins-bot\n",
 	);
