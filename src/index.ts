@@ -87,8 +87,8 @@ const SuinsRegistration = bcs.struct("SuinsRegistration", {
 
 // === Main App ===
 
-// Uses default host:port
-const redis = new Redis();
+// Uses REDIS_URL env var or defaults to localhost
+const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
 
 // Sui GRPC connection, should be an env variable...
 const grpc = new SuiGrpcClient({
