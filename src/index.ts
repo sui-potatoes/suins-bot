@@ -30,6 +30,7 @@ const MY_TRACKERS = "my-trackers";
 const ANOTHER_SEARCH = "another-search";
 const TRACK_NAME = "notify-name";
 const STOP_TRACKING_NAME = "stop-tracking-name";
+const VIEW_OWNER_NAMES = "view-owner-names";
 
 // === Redis Keys ===
 
@@ -100,29 +101,52 @@ const grpc = new SuiGrpcClient({
 const bot = new Bot<Context & MyContext>(BOT_TOKEN);
 
 // Notification levels in order of urgency
-type NotificationLevel = "30d" | "14d" | "3d" | "1d" | "expired";
-const NOTIFICATION_THRESHOLDS: { level: NotificationLevel; days: number }[] = [
-	{ level: "30d", days: 30 },
-	{ level: "14d", days: 14 },
-	{ level: "3d", days: 3 },
-	{ level: "1d", days: 1 },
-	{ level: "expired", days: 0 },
-];
+// Pre-expiration: 30d, 14d, 3d, 1d before expiration
+// Grace period: 30 days after expiration where owner can still renew
+// Grace notifications: at expiration (grace starts), then 15d, 7d, 3d, 1d before grace ends, and when grace ends
+type NotificationLevel =
+	| "30d"
+	| "14d"
+	| "3d"
+	| "1d"
+	| "expired"
+	| "grace_15d"
+	| "grace_7d"
+	| "grace_3d"
+	| "grace_1d"
+	| "grace_ended";
+
+const GRACE_PERIOD_DAYS = 30;
 
 /**
  * Determines the notification level based on days until expiration.
- * Iterates from most urgent (expired/0 days) to least urgent (30 days)
- * to find the correct threshold level.
+ * Handles both pre-expiration notifications and grace period notifications.
+ * @param daysLeft - Days until expiration (negative means already expired)
  */
 function getNotificationLevel(daysLeft: number): NotificationLevel | null {
-	// Iterate from most urgent to least urgent to find the correct level
-	for (let i = NOTIFICATION_THRESHOLDS.length - 1; i >= 0; i--) {
-		const { level, days } = NOTIFICATION_THRESHOLDS[i]!;
-		if (daysLeft <= days) {
-			return level;
-		}
+	// Grace period has ended (more than 30 days past expiration)
+	if (daysLeft <= -GRACE_PERIOD_DAYS) {
+		return "grace_ended";
 	}
-	return null;
+
+	// In grace period (expired but within 30 days)
+	if (daysLeft < 0) {
+		const graceDaysLeft = GRACE_PERIOD_DAYS + daysLeft; // e.g., 30 + (-5) = 25 days left in grace
+
+		if (graceDaysLeft <= 1) return "grace_1d";
+		if (graceDaysLeft <= 3) return "grace_3d";
+		if (graceDaysLeft <= 7) return "grace_7d";
+		if (graceDaysLeft <= 15) return "grace_15d";
+		return "expired"; // Just expired, grace period started
+	}
+
+	// Pre-expiration notifications
+	if (daysLeft <= 1) return "1d";
+	if (daysLeft <= 3) return "3d";
+	if (daysLeft <= 14) return "14d";
+	if (daysLeft <= 30) return "30d";
+
+	return null; // More than 30 days left, no notification needed
 }
 
 /**
@@ -135,6 +159,11 @@ function getLevelPriority(level: NotificationLevel): number {
 		"3d": 3,
 		"1d": 4,
 		expired: 5,
+		grace_15d: 6,
+		grace_7d: 7,
+		grace_3d: 8,
+		grace_1d: 9,
+		grace_ended: 10,
 	};
 	return priorities[level];
 }
@@ -171,24 +200,50 @@ async function markNotificationSent(
 
 /**
  * Generate notification message based on days left.
+ * @param daysLeft - Days until expiration (negative means in grace period)
  */
 function getNotificationMessage(name: string, daysLeft: number, expirationDate: Date): string {
 	const formattedName = formatName(name);
 	const dateStr = expirationDate.toUTCString();
+	const graceEndDate = new Date(expirationDate.getTime() + GRACE_PERIOD_DAYS * 24 * 3600 * 1000);
+	const graceEndStr = graceEndDate.toUTCString();
 
-	if (daysLeft <= 0) {
-		return `🚨 *EXPIRED*: Your name ${formattedName} has expired!\n\nExpired on: ${dateStr}\n\nRenew it now at [suins.io](https://suins.io/) before someone else registers it!`;
+	// Grace period has ended
+	if (daysLeft <= -GRACE_PERIOD_DAYS) {
+		return `⚫ *GRACE PERIOD ENDED*: Name ${formattedName} is now available for anyone to register!\n\nExpired on: ${dateStr}\nGrace period ended: ${graceEndStr}\n\nIf you still want this name, try to register it at [suins.io](https://suins.io/)`;
 	}
+
+	// In grace period
+	if (daysLeft < 0) {
+		const graceDaysLeft = GRACE_PERIOD_DAYS + daysLeft;
+
+		if (graceDaysLeft <= 1) {
+			return `🔴 *FINAL WARNING*: Grace period for ${formattedName} ends TOMORROW!\n\nExpired on: ${dateStr}\nGrace period ends: ${graceEndStr}\n\nThis is your last chance to renew at [suins.io](https://suins.io/) before the name becomes available to others!`;
+		}
+		if (graceDaysLeft <= 3) {
+			return `🟠 *URGENT*: Grace period for ${formattedName} ends in ${graceDaysLeft} days!\n\nExpired on: ${dateStr}\nGrace period ends: ${graceEndStr}\n\nRenew now at [suins.io](https://suins.io/) to keep this name!`;
+		}
+		if (graceDaysLeft <= 7) {
+			return `🟡 *Warning*: Grace period for ${formattedName} ends in ${graceDaysLeft} days.\n\nExpired on: ${dateStr}\nGrace period ends: ${graceEndStr}\n\nRenew at [suins.io](https://suins.io/) to keep this name.`;
+		}
+		if (graceDaysLeft <= 15) {
+			return `📅 *Reminder*: Grace period for ${formattedName} ends in ${graceDaysLeft} days.\n\nExpired on: ${dateStr}\nGrace period ends: ${graceEndStr}\n\nYou can still renew at [suins.io](https://suins.io/)`;
+		}
+		// Just expired, grace period started
+		return `🚨 *EXPIRED*: Name ${formattedName} has expired!\n\nExpired on: ${dateStr}\n\n⏳ *Grace period* of ${GRACE_PERIOD_DAYS} days has started. You can still renew until ${graceEndStr}.\n\nRenew at [suins.io](https://suins.io/) before the grace period ends!`;
+	}
+
+	// Pre-expiration notifications
 	if (daysLeft <= 1) {
-		return `🔴 *URGENT*: Your name ${formattedName} expires TOMORROW!\n\nExpires: ${dateStr}\n\nRenew at [suins.io](https://suins.io/)`;
+		return `🔴 *URGENT*: Name ${formattedName} expires TOMORROW!\n\nExpires: ${dateStr}\n\nRenew at [suins.io](https://suins.io/)`;
 	}
 	if (daysLeft <= 3) {
-		return `🟠 *Warning*: Your name ${formattedName} expires in ${daysLeft} days!\n\nExpires: ${dateStr}\n\nRenew at [suins.io](https://suins.io/)`;
+		return `🟠 *Warning*: Name ${formattedName} expires in ${daysLeft} days!\n\nExpires: ${dateStr}\n\nRenew at [suins.io](https://suins.io/)`;
 	}
 	if (daysLeft <= 14) {
-		return `🟡 *Reminder*: Your name ${formattedName} expires in ${daysLeft} days.\n\nExpires: ${dateStr}\n\nConsider renewing at [suins.io](https://suins.io/)`;
+		return `🟡 *Reminder*: Name ${formattedName} expires in ${daysLeft} days.\n\nExpires: ${dateStr}\n\nConsider renewing at [suins.io](https://suins.io/)`;
 	}
-	return `📅 *Heads up*: Your name ${formattedName} expires in ${daysLeft} days.\n\nExpires: ${dateStr}\n\nYou can renew anytime at [suins.io](https://suins.io/)`;
+	return `📅 *Heads up*: Name ${formattedName} expires in ${daysLeft} days.\n\nExpires: ${dateStr}\n\nYou can renew anytime at [suins.io](https://suins.io/)`;
 }
 
 /**
@@ -423,36 +478,18 @@ bot.callbackQuery(MY_TRACKERS, async (ctx) => {
 			const expirationMs = +record.expirationTimestamp.seconds.toString() * 1000;
 			const daysLeft = Math.floor((expirationMs - Date.now()) / (24 * 3600 * 1000));
 
-			// Get last notification level sent
-			const lastLevel = (await redis.get(
-				`${REDIS_NOTIFICATION_LEVEL}:${ctx.chatId}:${key}`,
-			)) as NotificationLevel | null;
-
-			// Calculate next notification
-			let nextNotification = "";
-			if (daysLeft <= 0) {
-				nextNotification = "expired";
+			// Determine status string
+			let statusStr = "";
+			if (daysLeft <= -GRACE_PERIOD_DAYS) {
+				statusStr = "grace ended";
+			} else if (daysLeft < 0) {
+				const graceDaysLeft = GRACE_PERIOD_DAYS + daysLeft;
+				statusStr = `grace: ${graceDaysLeft}d left`;
 			} else {
-				// Find next threshold that hasn't been notified yet
-				const thresholdDays = [30, 14, 3, 1, 0];
-				const lastPriority = lastLevel ? getLevelPriority(lastLevel) : 0;
-
-				for (const threshold of thresholdDays) {
-					const level = getNotificationLevel(threshold) as NotificationLevel;
-					if (getLevelPriority(level) > lastPriority && daysLeft > threshold) {
-						// Next notification will be when daysLeft reaches this threshold
-						const notifyInDays = daysLeft - threshold;
-						nextNotification = notifyInDays === 0 ? "today" : `in ${notifyInDays}d`;
-						break;
-					} else if (getLevelPriority(level) > lastPriority && daysLeft <= threshold) {
-						// Already past this threshold, notification pending
-						nextNotification = "pending";
-						break;
-					}
-				}
+				statusStr = `${daysLeft}d left`;
 			}
 
-			info = ` (${daysLeft}d left, notify ${nextNotification})`;
+			info = ` (${statusStr})`;
 		}
 
 		reply += `- ${formatName(key)}${info}\n`;
@@ -510,6 +547,60 @@ bot.callbackQuery(`${SEARCH_ADDRESS}:recent`, async (ctx) => {
 	ctx.session.waitingFor = "track-address:address";
 
 	await ctx.answerCallbackQuery();
+});
+
+/**
+ * Scenario:
+ * 1. /start
+ * 2. track single name
+ * 3. hit "View owner's names"
+ *
+ * Session:
+ * - uses `recentLookup` for owner address
+ *
+ * Expects:
+ * - `recentLookup`
+ */
+bot.callbackQuery(VIEW_OWNER_NAMES, async (ctx) => {
+	const address = ctx.session.recentLookup;
+
+	if (!address) {
+		return ctx.answerCallbackQuery("No owner address found");
+	}
+
+	await ctx.answerCallbackQuery("Fetching names...");
+
+	const names = await getSuinsNamesForAddress(address, null);
+
+	if (names === null) {
+		return ctx.reply("Something went wrong, unable to fetch names for this address");
+	}
+
+	const { header, chunks, footer } = prettyPrintListOfNames(address, names);
+
+	let footerSet = false;
+
+	if (chunks.length > 0) {
+		chunks[0] = `${header}\n${chunks[0]}`;
+		const lastIdx = chunks.length - 1;
+		chunks[lastIdx] += `\n${footer}`;
+		footerSet = true;
+	} else {
+		await ctx.reply(header);
+	}
+
+	for (let reply of chunks) {
+		await ctx.reply(reply, {
+			parse_mode: "MarkdownV2",
+			link_preview_options: { is_disabled: true },
+		});
+	}
+
+	if (!footerSet) {
+		await ctx.reply(footer);
+	}
+
+	return ctx.reply("What now?", { reply_markup: defaultKeyboard() });
 });
 
 /**
@@ -699,12 +790,18 @@ bot.on("message", async (ctx) => {
 
 		// Set session key for Name Record.
 		ctx.session.notifyFor = record;
+		ctx.session.recentLookup = owner;
 
 		const kb = new InlineKeyboard()
 			.text("Track expiration", TRACK_NAME)
 			.text("Another search", ANOTHER_SEARCH)
-			.row()
-			.text("My trackers", "my-trackers");
+			.row();
+
+		if (owner) {
+			kb.text("View owner's names", VIEW_OWNER_NAMES).row();
+		}
+
+		kb.text("My trackers", "my-trackers");
 
 		return ctx.reply(reply, {
 			parse_mode: "Markdown",
