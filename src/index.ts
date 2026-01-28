@@ -111,9 +111,13 @@ const NOTIFICATION_THRESHOLDS: { level: NotificationLevel; days: number }[] = [
 
 /**
  * Determines the notification level based on days until expiration.
+ * Iterates from most urgent (expired/0 days) to least urgent (30 days)
+ * to find the correct threshold level.
  */
 function getNotificationLevel(daysLeft: number): NotificationLevel | null {
-	for (const { level, days } of NOTIFICATION_THRESHOLDS) {
+	// Iterate from most urgent to least urgent to find the correct level
+	for (let i = NOTIFICATION_THRESHOLDS.length - 1; i >= 0; i--) {
+		const { level, days } = NOTIFICATION_THRESHOLDS[i]!;
 		if (daysLeft <= days) {
 			return level;
 		}
